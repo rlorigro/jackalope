@@ -1,0 +1,8 @@
+S	a	AAAAAAAA
+S	b	AAAAAAAA
+S	c	AAAAAAAA
+S	d	AAAAAAAA
+L	a	+	b	+
+L	a	+	c	+
+L	b	+	d	+
+L	c	+	d	+
