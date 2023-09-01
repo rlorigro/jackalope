@@ -1,14 +1,18 @@
+import random
+
 from modules.Gfa import iterate_gfa_edges,iterate_gfa_nodes
 from modules.Gaf import GafElement, iter_gaf_alignments
 from modules.IncrementalIdMap import IncrementalIdMap
-
+from cugraph import Graph,force_atlas2
+from cudf import DataFrame
 from collections import defaultdict
+import numpy
 import sys
 
 import matplotlib
 
 from PyQt5.QtCore import Qt, QLineF, QEvent
-from PyQt5.QtGui import QBrush, QPainter, QPen, QColor
+from PyQt5.QtGui import QBrush, QPainter, QPen, QColor, QPainterPath
 from PyQt5.QtWidgets import (
     QDialog,
     QLabel,
@@ -33,6 +37,13 @@ from PyQt5.QtWidgets import (
 import networkx
 
 
+def get_midpoint(a,b):
+    x = float(a[0] + b[0])/2.0
+    y = float(a[1] + b[1])/2.0
+
+    return x,y
+
+
 class OkPopup(QDialog):
     def __init__(self, title, message):
         super().__init__()
@@ -55,7 +66,8 @@ class Window(QWidget):
     def __init__(self):
         super().__init__()
 
-        self.line_width = 3
+        self.line_width = 2
+        self.highlight_width = 1
 
         self.scene_top = QGraphicsScene()
         self.scene_bottom = QGraphicsScene()
@@ -108,13 +120,14 @@ class Window(QWidget):
         # Alignment data
         self.alignments = defaultdict(list)
 
-        gfa_path = "/home/ryan/code/jackalope/data/test/simple.gfa"
-        self.gfa_path = "/home/ryan/data/test_hapslap/results/bad_tandem/chr20_4265303-4265453/graph_no_empty.gfa"
+        # self.gfa_path = "/home/ryan/data/test_hapslap/results/bad_tandem/chr20_4265303-4265453/graph_no_empty.gfa"
+        self.gfa_path = "/home/ryan/data/test_hapslap/evaluation/competitors/all/regional/chr20_65953277-65953889/sniffles_raw/variant_graph.gfa"
         # self.gfa_path = None
         self.load_gfa()
         self.draw_graph()
 
-        self.gaf_path = "/home/ryan/data/test_hapslap/results/bad_tandem/chr20_4265303-4265453/reads_vs_graph.gaf"
+        # self.gaf_path = "/home/ryan/data/test_hapslap/results/bad_tandem/chr20_4265303-4265453/reads_vs_graph.gaf"
+        self.gaf_path = "/home/ryan/data/test_hapslap/evaluation/competitors/all/regional/chr20_65953277-65953889/sniffles_raw/reads_vs_graph.gaf"
         # self.gaf_path = None
         self.load_gaf()
 
@@ -178,11 +191,9 @@ class Window(QWidget):
     def load_gaf(self):
         self.clear_gaf()
 
-        print("a")
         self.alignments = defaultdict(list)
         for a in iter_gaf_alignments(self.gaf_path):
             self.alignments[a.get_query_name()].append(a)
-            print("b")
 
             for name,reversal in a.get_path():
                 if name not in self.qt_nodes:
@@ -194,22 +205,16 @@ class Window(QWidget):
 
                     return
 
-        print("c")
-
         self.gaf_query_combobox.addItems(sorted(self.alignments.keys()))
 
         for query_name in self.alignments.keys():
             self.alignments[query_name] = sorted(self.alignments[query_name], key=lambda x: x.get_query_midpoint())
-
-        print("d")
 
         # Initialize the menu with whichever query is first
         self.on_select_gaf_query()
 
     def on_select_gaf_query(self):
         query_name = str(self.gaf_query_combobox.currentText())
-        print(query_name)
-        print("e")
 
         self.alignment_combobox.blockSignals(True)
         self.alignment_combobox.clear()
@@ -220,16 +225,11 @@ class Window(QWidget):
 
         self.alignment_combobox.blockSignals(False)
 
-        print("f")
-
         self.plot_alignments(query_name)
-        print("f4")
-
         self.on_select_alignment()
 
     def plot_alignments(self, query_name):
         self.scene_top.clear()
-        print("f1")
 
         scale = 1000
 
@@ -243,7 +243,6 @@ class Window(QWidget):
         # rect.setPen(pen)
 
         self.scene_top.addItem(rect)
-        print("f2")
 
         for i,alignment in enumerate(self.alignments[query_name]):
             a = alignment.get_query_start()
@@ -255,24 +254,17 @@ class Window(QWidget):
             y = (i+1)*25
             w = x2 - x1
 
-            print(x1, y, w, 20)
-
             rect2 = QGraphicsRectItem(x1, y, w, 20)
             brush = QBrush(Qt.blue)
             rect2.setBrush(brush)
-
-            print(rect2)
 
             rect2.instance_item = i
             rect2.setFlag(QGraphicsItem.ItemIsSelectable)
 
             self.scene_top.addItem(rect2)
 
-        print("f3")
-
     def color_alignment(self, alignment: GafElement):
         path = alignment.get_path()
-        print(path)
 
         for p,[name,reversal] in enumerate(path):
             color = self.colormap(float(p)/float(len(path)))
@@ -289,18 +281,17 @@ class Window(QWidget):
 
     def highlight_alignment(self, alignment: GafElement):
         path = alignment.get_path()
-        print(path)
 
         for p,[name,reversal] in enumerate(path):
             if name in self.qt_nodes:
-                line = self.qt_nodes[name]
+                path = self.qt_nodes[name]
 
-                pen = line.pen()
-                pen.setWidth(self.line_width+1)
+                pen = path.pen()
+                pen.setWidth(self.line_width+self.highlight_width)
                 pen.setColor(Qt.black)
 
-                item = self.scene_bottom.addLine(line.line(), pen)
-                item.setZValue(line.zValue()-1)
+                item = self.scene_bottom.addPath(path.path(), pen)
+                item.setZValue(path.zValue()-1)
                 self.bottom_highlight_items.append(item)
 
             else:
@@ -323,8 +314,6 @@ class Window(QWidget):
 
                 self.highlight_alignment(a)
 
-                print(alignment_index)
-
     def on_select_alignment(self):
         # First reset the colors
         for node in self.qt_nodes.values():
@@ -335,8 +324,6 @@ class Window(QWidget):
         query_name = str(self.gaf_query_combobox.currentText())
         selection = self.alignment_combobox.currentText()
 
-        print("g")
-
         if selection == "all":
             for a,alignment in enumerate(self.alignments[query_name]):
                 self.color_alignment(alignment)
@@ -345,8 +332,6 @@ class Window(QWidget):
             alignment_index = int(selection)
             alignment = self.alignments[query_name][alignment_index]
             self.color_alignment(alignment)
-
-        print("h")
 
     def redraw_graph(self):
         if self.gfa_path is not None and len(self.sequences) > 0:
@@ -403,60 +388,78 @@ class Window(QWidget):
 
         return super().eventFilter(source,event)
 
-    def draw_graph(self):
-        interval_size = 500
-        scale = 100
+    def build_path(self, points):
+        path = QPainterPath()
 
-        seed_graph = networkx.Graph()
-        graph = networkx.Graph()
+        for i,[x,y] in enumerate(points):
+            if i == 0:
+                path.moveTo(x,y)
+            else:
+                path.lineTo(x,y)
+
+        return path
+
+    def draw_graph(self):
+        # interval_size = 500
+        scale = 0.05
+
+        graph = Graph()
+        edges_as_ids = list()
+        id_map = IncrementalIdMap()
+
+        total_length = 0
+
+        for sequence in self.sequences.values():
+            total_length += len(sequence)
+
+        interval_size = total_length//100 + 1
+
+        subnodes = defaultdict(list)
 
         for name,sequence in self.sequences.items():
-            seed_graph.add_node(name)
+            n = max(3,len(sequence) // interval_size)
+            w = 1
 
-            n = len(sequence) // interval_size + 1
-            w = 10
+            name_left = name + "_left"
+            name_right = name + "_right"
 
-            graph.add_node(name + "_left")
-            graph.add_node(name + "_right")
-            # graph.add_node(sequence.name + "_top")
-            # graph.add_node(sequence.name + "_bottom")
+            id_left = id_map.add(name_left)
+            id_right = id_map.add(name_right)
 
-            graph.add_edge(name + "_left",name + "_right", weight=-0.01)
-            # graph.add_edge(sequence.name + "_top",sequence.name + "_bottom", weight=-1)
-            # graph.add_edge(sequence.name + "_left",sequence.name + "_bottom", weight=-1)
-            # graph.add_edge(sequence.name + "_right",sequence.name + "_bottom", weight=-1)
-            # graph.add_edge(sequence.name + "_left",sequence.name + "_top", weight=-1)
-            # graph.add_edge(sequence.name + "_right",sequence.name + "_top", weight=-1)
+            # edges_as_ids.append((id_left,id_right,-0.01))
 
             for i in range(n):
-                top_name = name + "_" + str(i) + "_top"
-                bottom_name = name + "_" + str(i) + "_bottom"
+                name_top = name + "_" + str(i) + "_top"
+                name_bottom = name + "_" + str(i) + "_bottom"
 
-                graph.add_node(top_name)
-                graph.add_node(bottom_name)
-                graph.add_edge(top_name,bottom_name)
+                id_top = id_map.add(name_top)
+                id_bottom = id_map.add(name_bottom)
+
+                # Keep track of which middle pairs of nodes constitute the scaffolding for a given node
+                subnodes[name].append([name_top,name_bottom])
+
+                edges_as_ids.append((id_top,id_bottom,w))
 
                 if i > 0:
-                    prev_top_name = name + "_" + str(i-1) + "_top"
-                    prev_bottom_name = name + "_" + str(i-1) + "_bottom"
+                    prev_id_top = id_map.get_id(name + "_" + str(i-1) + "_top")
+                    prev_id_bottom = id_map.get_id(name + "_" + str(i-1) + "_bottom")
 
-                    graph.add_edge(top_name,prev_bottom_name)
-                    graph.add_edge(top_name,prev_top_name)
-                    # graph.add_edge(bottom_name,prev_top_name)
-                    graph.add_edge(bottom_name,prev_bottom_name)
+                    edges_as_ids.append((id_top, prev_id_top, w))
+                    edges_as_ids.append((id_bottom, prev_id_bottom, w))
+                    edges_as_ids.append((id_top, prev_id_bottom, w))
+                    edges_as_ids.append((id_bottom, prev_id_top, w))
 
                 if i == 0:
-                    graph.add_edge(name + "_left", top_name, weight=w)
-                    graph.add_edge(name + "_left", bottom_name, weight=w)
+                    edges_as_ids.append((id_left, id_top, w))
+                    edges_as_ids.append((id_left, id_bottom, w))
 
                 if i == n-1:
-                    graph.add_edge(name + "_right", top_name, weight=w)
-                    graph.add_edge(name + "_right", bottom_name, weight=w)
+                    edges_as_ids.append((id_right, id_top, w))
+                    edges_as_ids.append((id_right, id_bottom, w))
 
         for edge in self.edges:
             l_a = len(self.sequences[edge.name_a])
             l_b = len(self.sequences[edge.name_b])
-            seed_graph.add_edge(edge.name_a, edge.name_b, weight=1/(max(l_a,l_b)))
 
             a = None
             b = None
@@ -471,22 +474,54 @@ class Window(QWidget):
             else:
                 b = edge.name_b + "_left"
 
-            graph.add_edge(a,b)
+            edges_as_ids.append((id_map.get_id(a), id_map.get_id(b), 1))
 
-        seed_layout = networkx.spring_layout(seed_graph, weight='weight', k=1/len(self.sequences))
-        layout = networkx.spring_layout(graph, weight='weight', pos=seed_layout, iterations=2000, k=1/graph.number_of_nodes())
+        edge_df = DataFrame(edges_as_ids)
 
-        # for a,b in graph.edges():
+        seed_positions = list()
+        for id,name in id_map:
+            x = random.randint(-50,50)
+            y = random.randint(-50,50)
+            seed_positions.append((id,x,y))
+
+        seed_df = DataFrame(seed_positions, columns=['vertex','x','y'])
+
+        print(edge_df.shape)
+        # print(df[0])
+        # exit()
+        # adjacency_matrix = numpy.zeros([len(id_map)]*2, dtype=float)
+
+        # for a,b,w in edges_as_ids:
+        #     adjacency_matrix[a,b] = w
+        #     adjacency_matrix[b,a] = w
+
+        graph.from_cudf_edgelist(edge_df, source=0, destination=1, weight=2)
+
+        result = force_atlas2(graph, pos_list=seed_df, max_iter=8000, jitter_tolerance=0.3, scaling_ratio=4.0, verbose=True, barnes_hut_theta=0.90)
+
+        layout = dict()
+        for i in range(len(result["vertex"])):
+            id = int(result["vertex"][i])
+            name = id_map.get_name(id)
+
+            layout[name] = (scale*result['x'][i], scale*result['y'][i])
+
+        # layout = networkx.spring_layout(graph, weight='weight', pos=seed_layout, iterations=2000, k=1/graph.number_of_nodes())
+
+        # for id_a,id_b,w in edges_as_ids:
+        #     a = id_map.get_name(id_a)
+        #     b = id_map.get_name(id_b)
+        #
         #     pen = QPen(Qt.red)
         #     x_a,y_a = layout[a]
         #     x_b,y_b = layout[b]
         #
-        #     ellipse = QGraphicsEllipseItem(x_a*scale,y_a*scale,1,1)
+        #     ellipse = QGraphicsEllipseItem(x_a,y_a,1,1)
         #     self.scene_bottom.addItem(ellipse)
-        #     ellipse = QGraphicsEllipseItem(x_b*scale,y_b*scale,1,1)
+        #     ellipse = QGraphicsEllipseItem(x_b,y_b,1,1)
         #     self.scene_bottom.addItem(ellipse)
         #
-        #     self.scene_bottom.addLine(QLineF(x_a*scale, y_a*scale, x_b*scale, y_b*scale), pen)
+        #     self.scene_bottom.addLine(QLineF(x_a, y_a, x_b, y_b), pen)
 
         for edge in self.edges:
             x_a = None
@@ -504,18 +539,41 @@ class Window(QWidget):
             else:
                 x_b,y_b = layout[edge.name_b + "_left"]
 
-            item = self.scene_bottom.addLine(QLineF(x_a*scale, y_a*scale, x_b*scale, y_b*scale))
+            color = QColor(Qt.black)
+            color.setAlphaF(0.7)
 
-        for name in self.sequences.keys():
-            x_a,y_a = layout[name + "_left"]
-            x_b,y_b = layout[name + "_right"]
-            pen = QPen(Qt.gray)
+            pen = QPen(color)
+            pen.setWidth(max(1,self.line_width//3))
+
+            item = self.scene_bottom.addLine(QLineF(x_a, y_a, x_b, y_b), pen=pen)
+
+        for name,node_pairs in subnodes.items():
+            start = name + "_left"
+            stop = name + "_right"
+
+            points = [layout[start]] + [get_midpoint(layout[a],layout[b]) for a,b in node_pairs] + [layout[stop]]
+
+            path = self.build_path(points)
+
+            pen = QPen(Qt.gray | Qt.FlatCap | Qt.BevelJoin)
             pen.setWidth(self.line_width)
+            item = self.scene_bottom.addPath(path, pen)
 
-            item = self.scene_bottom.addLine(QLineF(x_a*scale, y_a*scale, x_b*scale, y_b*scale), pen)
             item.setFlag(QGraphicsItem.ItemIsSelectable)
-
             self.qt_nodes[name] = item
+
+
+
+        # for name in self.sequences.keys():
+        #     x_a,y_a = layout[name + "_left"]
+        #     x_b,y_b = layout[name + "_right"]
+        #     pen = QPen(Qt.gray)
+        #     pen.setWidth(self.line_width)
+        #
+        #     item = self.scene_bottom.addLine(QLineF(x_a*scale, y_a*scale, x_b*scale, y_b*scale), pen)
+        #     item.setFlag(QGraphicsItem.ItemIsSelectable)
+        #
+        #     self.qt_nodes[name] = item
 
 
 def main():
