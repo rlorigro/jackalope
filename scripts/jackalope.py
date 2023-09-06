@@ -1,17 +1,28 @@
+from collections import defaultdict
 import os.path
 import random
 
 from modules.Gfa import iterate_gfa_edges,iterate_gfa_nodes
 from modules.Gaf import GafElement, iter_gaf_alignments
 from modules.IncrementalIdMap import IncrementalIdMap
-from cugraph import Graph,force_atlas2
-from cudf import DataFrame
-from collections import defaultdict
+
+import matplotlib
+import networkx
+
+import importlib.util
 import numpy
 import math
 import sys
 
-import matplotlib
+USE_CUDA = False
+if USE_CUDA and importlib.util.find_spec("cugraph") is not None and importlib.util.find_spec("cudf") is not None:
+    sys.stderr.write("Found: cugraph/cudf libs\n")
+    from cugraph import Graph as cuGraph
+    from cugraph import force_atlas2
+    from cudf import DataFrame
+else:
+    sys.stderr.write("NOT found: cugraph/cudf libs\n")
+
 
 from PyQt5.QtCore import Qt, QLineF, QEvent, QUrl
 from PyQt5.QtGui import QBrush, QPainter, QPen, QColor, QPainterPath
@@ -26,8 +37,10 @@ from PyQt5.QtWidgets import (
     QGraphicsEllipseItem,
     QGraphicsItem,
     QGraphicsRectItem,
+    QGraphicsTextItem,
     QGraphicsScene,
     QGraphicsView,
+    QLineEdit,
     QPlainTextEdit,
     QHBoxLayout,
     QPushButton,
@@ -129,36 +142,33 @@ class GafStatsPopup(QDialog):
 
 
 class Window(QWidget):
-    def __init__(self):
+    def __init__(self, gfa_path=None, gaf_path=None):
         super().__init__()
+        self.use_cugraph = False
 
         self.line_width = 2
         self.highlight_width = 1
+        self.length_scale_factor = 100
+        self.layout_iterations = 100
+        self.min_node_length = 3
 
         self.scene_middle = QGraphicsScene()
         self.scene_bottom = QGraphicsScene()
 
-        # self.project_dir = os.path.dirname(os.path.dirname(__file__))
-        # self.igv_html = os.path.join(self.project_dir, "html/igv.html")
-        #
-        # print(self.igv_html)
-        #
-        # self.view_top = QWebEngineView()
-        # self.view_top.resize(800,300)
-        # # self.view_top.load(QUrl("http://www.google.com/"))
-        # self.view_top.load(QUrl.fromLocalFile(self.igv_html))
-        # self.view_top.show()
-        # self.view_top.loadFinished.connect(self.load_finished)
-
         self.view_bottom = QGraphicsView(self.scene_bottom)
+        self.view_bottom.resize(600,300)
         self.view_bottom.setRenderHint(QPainter.Antialiasing)
 
         self.view_middle = QGraphicsView(self.scene_middle)
+        self.view_middle.resize(600,300)
         self.view_middle.setRenderHint(QPainter.Antialiasing)
 
+        self.line_width_field = None
+        self.length_scale_factor_field = None
         self.control_panel_left = None
         self.construct_left_control_panel()
 
+        self.top_label = None
         self.control_panel_top = None
         self.construct_top_control_panel()
 
@@ -174,11 +184,10 @@ class Window(QWidget):
         #  5  C  B  B  B
 
         # origin is top left AND x and y are swapped in function calls
-        self.grid.addLayout(self.control_panel_top, 0,1,1,3)
         self.grid.addLayout(self.control_panel_left, 0,0,4,1)
-        # self.grid.addWidget(self.view_top, 1,1,2,3)
-        self.grid.addWidget(self.view_middle, 1,1,1,3)
-        self.grid.addWidget(self.view_bottom, 3,1,2,3)
+        self.grid.addLayout(self.control_panel_top,  0,1,1,3)
+        self.grid.addWidget(self.view_middle,        1,1,1,3)
+        self.grid.addWidget(self.view_bottom,        2,1,2,3)
         self.setLayout(self.grid)
 
         self.gaf_query_combobox = QComboBox()
@@ -200,16 +209,15 @@ class Window(QWidget):
         # Alignment data
         self.alignments = defaultdict(list)
 
-        # self.gfa_path = "/home/ryan/data/test_hapslap/results/bad_tandem/chr20_4265303-4265453/graph_no_empty.gfa"
-        self.gfa_path = "/home/ryan/data/test_hapslap/evaluation/competitors/all/regional/chr20_65953277-65953889/sniffles_raw/variant_graph.gfa"
-        # self.gfa_path = None
-        self.load_gfa()
-        self.draw_graph()
+        self.gfa_path = gfa_path
+        self.gaf_path = gaf_path
 
-        # self.gaf_path = "/home/ryan/data/test_hapslap/results/bad_tandem/chr20_4265303-4265453/reads_vs_graph.gaf"
-        self.gaf_path = "/home/ryan/data/test_hapslap/evaluation/competitors/all/regional/chr20_65953277-65953889/sniffles_raw/reads_vs_graph.gaf"
-        # self.gaf_path = None
-        self.load_gaf()
+        if gfa_path is not None:
+            self.load_gfa()
+            self.draw_graph()
+
+        if gaf_path is not None:
+            self.load_gaf()
 
         self.bottom_highlight_items = list()
 
@@ -217,10 +225,24 @@ class Window(QWidget):
 
         self.view_bottom.viewport().installEventFilter(self)
 
+        for i in range(self.grid.columnCount()):
+            w = 0 if i==0 else 8
+            self.grid.setColumnMinimumWidth(i,200)
+            self.grid.setColumnStretch(i,w)
+
+        for i in range(self.grid.rowCount()):
+            w = 0 if i==0 else 8
+            h = 50 if i==0 else 200
+            self.grid.setRowMinimumHeight(i,h)
+            self.grid.setRowStretch(i,w)
+
     def load_finished(self):
         print("done")
 
     def open_gfa(self):
+        self.reset_highlights()
+        self.scene_bottom.clear()
+
         # https://pythonspot.com/pyqt5-file-dialog/
         options = QFileDialog.Options()
         options |= QFileDialog.DontUseNativeDialog
@@ -230,6 +252,7 @@ class Window(QWidget):
             self.gfa_path = filename
             self.load_gfa()
             self.draw_graph()
+            self.on_select_gaf_query()
 
     def open_gaf(self):
         # https://pythonspot.com/pyqt5-file-dialog/
@@ -244,7 +267,8 @@ class Window(QWidget):
     def load_gfa(self):
         # This will be called repeatedly in some cases, so reset the relevant datastructures
         self.scene_bottom.clear()
-        self.bottom_highlight_items = list()
+        self.reset_highlights()
+        self.clear_gaf()
 
         self.qt_nodes = dict()
         self.sequences = dict()
@@ -258,8 +282,6 @@ class Window(QWidget):
             self.edges.append(edge)
             self.name_to_edge[edge.name_a].append(len(self.edges) - 1)
             self.name_to_edge[edge.name_b].append(len(self.edges) - 1)
-
-        self.clear_gaf()
 
     def clear_gaf(self):
         self.scene_middle.clear()
@@ -314,11 +336,21 @@ class Window(QWidget):
     def plot_alignments(self, query_name):
         self.scene_middle.clear()
 
+        text_items = list()
+
+        text_offset = 0
+        text_target_limit = -10
         scale = 1000
 
         rect = QGraphicsRectItem(0, 0, scale, 20)
         brush = QBrush(Qt.gray)
         rect.setBrush(brush)
+
+        label = QGraphicsTextItem(query_name)
+        label.setPos(text_offset + 0,0)
+        text_items.append(label)
+
+        self.scene_middle.addItem(label)
 
         # # Define the pen (line)
         # pen = QPen(Qt.black)
@@ -338,13 +370,23 @@ class Window(QWidget):
             w = x2 - x1
 
             rect2 = QGraphicsRectItem(x1, y, w, 20)
+            label = QGraphicsTextItem("Alignment " + str(i))
+            label.setPos(text_offset,y)
+            text_items.append(label)
+
             brush = QBrush(Qt.blue)
             rect2.setBrush(brush)
 
             rect2.instance_item = i
             rect2.setFlag(QGraphicsItem.ItemIsSelectable)
 
+            self.scene_middle.addItem(label)
             self.scene_middle.addItem(rect2)
+
+        for item in text_items:
+            w = item.boundingRect().width()
+            y = item.pos().y()
+            item.setPos(text_target_limit - w, y)
 
     def color_alignment(self, alignment: GafElement):
         path = alignment.get_path()
@@ -380,11 +422,13 @@ class Window(QWidget):
             else:
                 raise Exception("ERROR: bad GAF node")
 
-    def on_select_alignment_block(self):
+    def reset_highlights(self):
         for item in self.bottom_highlight_items:
             self.scene_bottom.removeItem(item)
+            self.bottom_highlight_items = list()
 
-        self.bottom_highlight_items = list()
+    def on_select_alignment_block(self):
+        self.reset_highlights()
 
         items = self.scene_middle.selectedItems()
 
@@ -418,6 +462,7 @@ class Window(QWidget):
 
     def redraw_graph(self):
         if self.gfa_path is not None and len(self.sequences) > 0:
+            self.reset_highlights()
             self.scene_bottom.clear()
             self.draw_graph()
             self.on_select_gaf_query()
@@ -441,9 +486,103 @@ class Window(QWidget):
         button.clicked.connect(self.show_alignment_details)
         self.control_panel_left.addWidget(button)
 
+        # Node width field
+        field_layout = QHBoxLayout()
+        field_label = QLabel("Node width:")
+        self.line_width_field = QLineEdit(str(self.line_width))
+        self.line_width_field.textChanged.connect(self.adjust_node_width)
+        field_layout.addWidget(field_label)
+        field_layout.addWidget(self.line_width_field)
+        self.control_panel_left.addLayout(field_layout)
+
+        # Length scale field
+        field_layout = QHBoxLayout()
+        field_label = QLabel("Target total points:")
+        self.length_scale_factor_field = QLineEdit(str(self.length_scale_factor))
+        self.length_scale_factor_field.textChanged.connect(self.adjust_length_scale_factor)
+        field_layout.addWidget(field_label)
+        field_layout.addWidget(self.length_scale_factor_field)
+        self.control_panel_left.addLayout(field_layout)
+
+        # Min length field
+        field_layout = QHBoxLayout()
+        field_label = QLabel("Minimum node length:")
+        self.min_node_length_field = QLineEdit(str(self.min_node_length))
+        self.min_node_length_field.textChanged.connect(self.adjust_min_node_length)
+        field_layout.addWidget(field_label)
+        field_layout.addWidget(self.min_node_length_field)
+        self.control_panel_left.addLayout(field_layout)
+
+        # field_layout = QHBoxLayout()
+        # field_label = QLabel("Graph layout iterations:")
+        # self.layout_iterations_field = QLineEdit(str(self.layout_iterations))
+        # self.layout_iterations_field.textChanged.connect(self.adjust_layout_iterations)
+        # field_layout.addWidget(field_label)
+        # field_layout.addWidget(self.layout_iterations_field)
+        # self.control_panel_left.addLayout(field_layout)
+
         self.control_panel_left.setAlignment(Qt.AlignTop)
         self.control_panel_left.setSpacing(2)
         self.control_panel_left.addStretch(1)
+
+    def parse_string_as_numeric_positive_integer(self,s):
+        i = None
+
+        if s == "":
+            pass
+        elif not s.isnumeric():
+            d = OkPopup("ERROR", "Must enter numeric integer value")
+            d.exec()
+        else:
+            i = int(s)
+
+            if i < 0:
+                d = OkPopup("ERROR", "Must enter POSITIVE numeric integer value")
+                d.exec()
+                i = None
+
+        return i
+
+    def adjust_node_width(self):
+        s = self.line_width_field.text()
+        i = self.parse_string_as_numeric_positive_integer(s)
+
+        if i is None:
+            return
+
+        self.line_width = i
+
+        for item in self.qt_nodes.values():
+            pen = item.pen()
+            pen.setWidth(self.line_width)
+            item.setPen(pen)
+
+    def adjust_length_scale_factor(self):
+        s = self.length_scale_factor_field.text()
+        i = self.parse_string_as_numeric_positive_integer(s)
+
+        if i is None:
+            return
+
+        self.length_scale_factor = i
+
+    def adjust_min_node_length(self):
+        s = self.min_node_length_field.text()
+        i = self.parse_string_as_numeric_positive_integer(s)
+
+        if i is None:
+            return
+
+        self.min_node_length = i
+
+    def adjust_layout_iterations(self):
+        s = self.length_scale_factor_field.text()
+        i = self.parse_string_as_numeric_positive_integer(s)
+
+        if i is None:
+            return
+
+        self.layout_iterations = i
 
     def show_alignment_details(self):
         items = self.scene_middle.selectedItems()
@@ -466,8 +605,9 @@ class Window(QWidget):
             d.exec()
 
     def construct_top_control_panel(self):
+        self.top_label = QLabel("Alignments")
         self.control_panel_top = QVBoxLayout()
-
+        self.control_panel_top.addWidget(self.top_label)
         self.control_panel_top.setAlignment(Qt.AlignTop)
         self.control_panel_top.setSpacing(2)
         # self.control_panel_top.addStretch(1)
@@ -511,32 +651,110 @@ class Window(QWidget):
 
         return path
 
+    def layout_with_cugraph(self, seed_positions, seed_edges_as_ids, edges_as_ids, id_map, seed_id_map, scale):
+        seed_df = DataFrame(seed_positions, columns=['vertex','x','y'])
+
+        seed_edge_df = DataFrame(seed_edges_as_ids)
+        edge_df = DataFrame(edges_as_ids)
+
+        seed_graph = cuGraph()
+        graph = cuGraph()
+
+        seed_graph.from_cudf_edgelist(seed_edge_df, source=0, destination=1, weight=2)
+        seed_result = force_atlas2(seed_graph, max_iter=1000, pos_list=seed_df, scaling_ratio=8.0, verbose=True)
+
+        print(type(seed_result))
+        print(seed_result.shape)
+
+        initial_positions = list()
+        prev_name = None
+        item = None
+
+        for id,name in id_map:
+            seed_name = name.split('_')[0]
+            seed_id = seed_id_map.get_id(seed_name)
+
+            if seed_name != prev_name:
+                item = seed_result.iloc[seed_id]
+
+            x = item['x']
+            y = item['y']
+            # print(seed_name, item)
+
+            # print(seed_name, x, y)
+
+            initial_positions.append((id,x,y))
+
+            prev_name = seed_name
+
+        print("Loading full graph as CuDF...")
+        initial_positions_df = DataFrame(initial_positions, columns=['vertex','x','y'])
+
+        print()
+        print("Graph layout...")
+
+        print(edge_df.shape)
+
+        graph.from_cudf_edgelist(edge_df, source=0, destination=1, weight=2)
+
+        result = force_atlas2(graph, pos_list=initial_positions_df, max_iter=4000, jitter_tolerance=0.3, scaling_ratio=4.0, verbose=True, barnes_hut_theta=0.90)
+
+        layout = dict()
+        for i in range(len(result["vertex"])):
+            id = int(result["vertex"][i])
+            name = id_map.get_name(id)
+
+            layout[name] = (scale*result['x'][i], scale*result['y'][i])
+
+        return layout
+
+    def layout_with_graphviz(self, edges_as_ids, id_map, scale):
+        graph = networkx.Graph()
+
+        print()
+        print("Graph layout...")
+
+        graph.add_nodes_from(range(len(id_map)))
+
+        for a,b,w in edges_as_ids:
+            graph.add_edge(a,b,weight=w)
+
+        s = random.randint(0,2**16-1)
+        result = networkx.drawing.nx_agraph.graphviz_layout(graph, prog="sfdp", args="-Grepulsiveforce=1.2 -Gstart=%d" % s)
+
+        layout = dict()
+        for id,item in result.items():
+            name = id_map.get_name(id)
+
+            layout[name] = item
+
+        return layout
+
     def draw_graph(self):
         # interval_size = 500
-        scale = 0.03
 
-        seed_graph = Graph()
         seed_edges_as_ids = list()
         seed_id_map = IncrementalIdMap()
 
-        graph = Graph()
         edges_as_ids = list()
         id_map = IncrementalIdMap()
 
         total_length = 0
-
         for sequence in self.sequences.values():
             total_length += len(sequence)
 
-        interval_size = total_length//100 + 1
+        interval_size = (float(total_length)/float(self.length_scale_factor))
+
+        print("total_length:", total_length)
+        print("length_scale_factor:", self.length_scale_factor)
+        print("interval_size:", interval_size)
 
         subnodes = defaultdict(list)
 
         for name,sequence in self.sequences.items():
-            n = max(3,len(sequence) // interval_size)
+            n = max(self.min_node_length,int(round(float(len(sequence)) / float(interval_size))))
             w = 1
 
-            name_seed = name
             seed_id_map.add(name)
 
             name_left = name + "_left"
@@ -601,10 +819,6 @@ class Window(QWidget):
 
             edges_as_ids.append((id_map.get_id(a), id_map.get_id(b), 0.5))
 
-        seed_edge_df = DataFrame(seed_edges_as_ids)
-
-        edge_df = DataFrame(edges_as_ids)
-
         print("Loading coarse graph as CuDF...")
 
         seed_positions = list()
@@ -613,80 +827,12 @@ class Window(QWidget):
             y = random.randint(-50,50)
             seed_positions.append((id,x,y))
 
-        seed_df = DataFrame(seed_positions, columns=['vertex','x','y'])
-
-        print()
-        print("Coarse graph layout...")
-
-        seed_graph.from_cudf_edgelist(seed_edge_df, source=0, destination=1, weight=2)
-        seed_result = force_atlas2(seed_graph, max_iter=1000, pos_list=seed_df, scaling_ratio=8.0, verbose=True)
-
-        print(type(seed_result))
-        print(seed_result.shape)
-
-        initial_positions = list()
-        prev_name = None
-        item = None
-
-        for id,name in id_map:
-            seed_name = name.split('_')[0]
-            seed_id = seed_id_map.get_id(seed_name)
-
-            if seed_name != prev_name:
-                item = seed_result.iloc[seed_id]
-
-            x = item['x']
-            y = item['y']
-            # print(seed_name, item)
-
-            # print(seed_name, x, y)
-
-            initial_positions.append((id,x,y))
-
-            prev_name = seed_name
-
-        print("Loading full graph as CuDF...")
-        initial_positions_df = DataFrame(initial_positions, columns=['vertex','x','y'])
-
-        print()
-        print("Graph layout...")
-
-        print(edge_df.shape)
-        # print(df[0])
-        # exit()
-        # adjacency_matrix = numpy.zeros([len(id_map)]*2, dtype=float)
-
-        # for a,b,w in edges_as_ids:
-        #     adjacency_matrix[a,b] = w
-        #     adjacency_matrix[b,a] = w
-
-        graph.from_cudf_edgelist(edge_df, source=0, destination=1, weight=2)
-
-        result = force_atlas2(graph, pos_list=initial_positions_df, max_iter=4000, jitter_tolerance=0.3, scaling_ratio=4.0, verbose=True, barnes_hut_theta=0.90)
-
-        layout = dict()
-        for i in range(len(result["vertex"])):
-            id = int(result["vertex"][i])
-            name = id_map.get_name(id)
-
-            layout[name] = (scale*result['x'][i], scale*result['y'][i])
-
-        # layout = networkx.spring_layout(graph, weight='weight', pos=seed_layout, iterations=2000, k=1/graph.number_of_nodes())
-
-        # for id_a,id_b,w in edges_as_ids:
-        #     a = id_map.get_name(id_a)
-        #     b = id_map.get_name(id_b)
-        #
-        #     pen = QPen(Qt.red)
-        #     x_a,y_a = layout[a]
-        #     x_b,y_b = layout[b]
-        #
-        #     ellipse = QGraphicsEllipseItem(x_a,y_a,1,1)
-        #     self.scene_bottom.addItem(ellipse)
-        #     ellipse = QGraphicsEllipseItem(x_b,y_b,1,1)
-        #     self.scene_bottom.addItem(ellipse)
-        #
-        #     self.scene_bottom.addLine(QLineF(x_a, y_a, x_b, y_b), pen)
+        if self.use_cugraph:
+            scale = 0.03
+            layout = self.layout_with_cugraph(seed_positions, seed_edges_as_ids, edges_as_ids, id_map, seed_id_map, scale)
+        else:
+            scale = 10
+            layout = self.layout_with_graphviz(edges_as_ids, id_map, scale)
 
         for edge in self.edges:
             x_a = None
@@ -727,18 +873,7 @@ class Window(QWidget):
             item.setFlag(QGraphicsItem.ItemIsSelectable)
             self.qt_nodes[name] = item
 
-
-
-        # for name in self.sequences.keys():
-        #     x_a,y_a = layout[name + "_left"]
-        #     x_b,y_b = layout[name + "_right"]
-        #     pen = QPen(Qt.gray)
-        #     pen.setWidth(self.line_width)
-        #
-        #     item = self.scene_bottom.addLine(QLineF(x_a*scale, y_a*scale, x_b*scale, y_b*scale), pen)
-        #     item.setFlag(QGraphicsItem.ItemIsSelectable)
-        #
-        #     self.qt_nodes[name] = item
+        self.scene_bottom.update()
 
 
 def main():
