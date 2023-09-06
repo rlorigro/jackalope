@@ -2,8 +2,8 @@
 
 ## Dependencies
 
-The graph layout step can either be CPU or GPU driven. In practice the CPU (graphviz)
-is plenty fast, if not faster than GPU, and GPU is harder to install.
+The graph layout step can either be CPU or GPU driven. In practice the CPU (graphviz) implementation
+is plenty fast, if not faster than GPU
 
 **GPU (optional)**
 
