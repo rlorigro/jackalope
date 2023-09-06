@@ -160,6 +160,9 @@ class GafElement:
 
         return path
 
+    def get_path_string(self):
+        return self.tokens[5]
+
     def get_ref_length(self):
         return self.tokens[6]
 
@@ -209,5 +212,5 @@ class GafElement:
 def iter_gaf_alignments(gaf_path):
     with open(gaf_path, 'r') as file:
         for l,line in enumerate(file):
-            yield GafElement(line)
+            yield GafElement(line,True)
 
