@@ -1,10 +1,13 @@
+import multiprocessing
 from collections import defaultdict
+import tempfile
 import os.path
 import random
 
 from modules.Gfa import iterate_gfa_edges,iterate_gfa_nodes
 from modules.Gaf import GafElement, iter_gaf_alignments
 from modules.IncrementalIdMap import IncrementalIdMap
+from modules.Align import run_minigraph,run_panaligner
 
 import matplotlib
 import networkx
@@ -41,6 +44,7 @@ from PyQt5.QtWidgets import (
     QGraphicsScene,
     QGraphicsView,
     QLineEdit,
+    QCheckBox,
     QPlainTextEdit,
     QHBoxLayout,
     QPushButton,
@@ -53,11 +57,164 @@ from PyQt5.QtWidgets import (
 )
 
 
+def parse_string_as_numeric_positive_integer(s):
+    i = None
+
+    if s == "":
+        pass
+    elif not s.isnumeric():
+        d = OkPopup("ERROR", "Must enter numeric integer value")
+        d.exec()
+    else:
+        i = int(s)
+
+        if i < 0:
+            d = OkPopup("ERROR", "Must enter POSITIVE numeric integer value")
+            d.exec()
+            i = None
+
+    return i
+
+
 def get_midpoint(a,b):
     x = float(a[0] + b[0])/2.0
     y = float(a[1] + b[1])/2.0
 
     return x,y
+
+
+class RunAlignmentPopup(QDialog):
+    def __init__(self, gfa_path):
+        super().__init__()
+
+        self.gfa_path = gfa_path
+        self.gaf_path = None
+
+        self.layout = QVBoxLayout()
+
+        self.setWindowTitle("Run new alignment")
+
+        args = [
+            "-c", "\n" +
+            "-g", str(10000), "\n" +
+            "-k", str(14), "\n" +
+            "-f", "0.25", "\n" +
+            "-r", "1000,20000", "\n" +
+            "-n", "3,3", "\n" +
+            "-p", str(0.5), "\n" +
+            "-x", "lr", "\n"
+        ]
+
+        # Node width field
+        field_label = QLabel("Arguments:")
+        self.args_field = QPlainTextEdit(" ".join(args))
+
+        self.layout.addWidget(field_label)
+        self.layout.addWidget(self.args_field)
+
+        # THREADS FIELD
+        threads_layout = QHBoxLayout()
+        threads_label = QLabel("Threads:")
+
+        self.threads_field = QLineEdit(str(multiprocessing.cpu_count()))
+        self.threads_field.textChanged.connect(self.parse_threads)
+
+        # Construct composite row of elements
+        threads_layout.addWidget(threads_label)
+        threads_layout.addWidget(self.threads_field)
+
+        # Add to dialog box
+        self.layout.addLayout(threads_layout)
+
+        temp_dir = tempfile.mkdtemp()
+
+        # INPUT FIELD
+        # from unknown location
+        input_layout = QHBoxLayout()
+        input_label = QLabel("Input Fasta file:")
+
+        self.input_field = QLineEdit("")
+
+        button = QPushButton("Browse")
+        button.clicked.connect(self.open_fasta)
+
+        # Construct composite row of elements
+        input_layout.addWidget(input_label)
+        input_layout.addWidget(self.input_field)
+        input_layout.addWidget(button)
+
+        # Add to dialog box
+        self.layout.addLayout(input_layout)
+
+        # OUTPUT FIELD
+        # to an auto-generated tmp file by default, but allow other options
+        output_layout = QHBoxLayout()
+        output_label = QLabel("Output location (must exist):")
+
+        self.output_field = QLineEdit(temp_dir)
+
+        button = QPushButton("Browse")
+        button.clicked.connect(self.open_directory)
+
+        # Construct composite row of elements
+        output_layout.addWidget(output_label)
+        output_layout.addWidget(self.output_field)
+        output_layout.addWidget(button)
+
+        # Add to dialog box
+        self.layout.addLayout(output_layout)
+
+        # Should the alignments replace the current GAF alignments or append it?
+        replacement_checkbox = QCheckBox("Replace alignments (default=append)")
+        self.layout.addWidget(replacement_checkbox)
+
+        run_button = QPushButton("Run")
+        run_button.clicked.connect(self.run_alignment)
+        self.layout.addWidget(run_button)
+
+        QBtn = QDialogButtonBox.Ok
+
+        self.buttonBox = QDialogButtonBox(QBtn)
+        self.buttonBox.accepted.connect(self.accept)
+
+        self.layout.addWidget(self.buttonBox)
+        self.setLayout(self.layout)
+
+    def parse_threads(self):
+        i = parse_string_as_numeric_positive_integer(self.threads_field.text())
+
+        return i
+
+    def open_directory(self):
+        options = QFileDialog.Options()
+        options |= QFileDialog.DontResolveSymlinks
+        options |= QFileDialog.ShowDirsOnly
+        directory = QFileDialog.getExistingDirectory(self, options=options)
+
+        if directory != '':
+            self.output_field.setText(directory)
+
+    def open_fasta(self):
+        d = QFileDialog()
+        d.setFileMode(QFileDialog.ExistingFile)
+        filename, _ = d.getOpenFileName(self)
+
+        if filename != '' and str(filename).endswith(".fasta"):
+            self.input_field.setText(filename)
+
+    def run_alignment(self):
+        args = self.args_field.toPlainText().strip().split()
+        n_threads = self.parse_threads()
+        fasta_path = self.input_field.text()
+        output_dir = self.output_field.text()
+
+        self.gaf_path = run_minigraph(
+            output_directory=output_dir,
+            gfa_path=self.gfa_path,
+            fasta_path=fasta_path,
+            n_threads=n_threads,
+            args_override=args
+        )
 
 
 class OkPopup(QDialog):
@@ -98,25 +255,36 @@ class GafStatsPopup(QDialog):
         self.path_box = QPlainTextEdit()
 
         cigar_string = ""
+        cigar = None
+
+        try:
+            cigar = alignment.get_cigar()
+        except Exception as e:
+            d = OkPopup("ERROR", str(e))
+            d.exec()
+            cigar = None
 
         n_match = 0
         n_mismatch = 0
         n_delete = 0
         n_insert = 0
-        for c,length in alignment.get_cigar():
-            cigar_string += c
-            cigar_string += str(length)
+        identity = 0
 
-            if c == "=":
-                n_match += length
-            if c == "X":
-                n_mismatch += length
-            if c == "D":
-                n_delete += length
-            if c == "I":
-                n_insert += length
+        if cigar is not None:
+            for c,length in cigar:
+                cigar_string += c
+                cigar_string += str(length)
 
-        identity = float(n_match) / float(n_match + n_mismatch + n_insert + n_delete)
+                if c == "=":
+                    n_match += length
+                if c == "X":
+                    n_mismatch += length
+                if c == "D":
+                    n_delete += length
+                if c == "I":
+                    n_insert += length
+
+            identity = float(n_match) / float(n_match + n_mismatch + n_insert + n_delete)
 
         self.stats_text = QLabel(
             "n_match:\t" + str(n_match) + '\n'
@@ -293,8 +461,9 @@ class Window(QWidget):
         self.gaf_query_combobox.clear()
         self.gaf_query_combobox.blockSignals(False)
 
-    def load_gaf(self):
-        self.clear_gaf()
+    def load_gaf(self, replace=True):
+        if replace:
+            self.clear_gaf()
 
         self.alignments = defaultdict(list)
         for a in iter_gaf_alignments(self.gaf_path):
@@ -467,6 +636,19 @@ class Window(QWidget):
             self.draw_graph()
             self.on_select_gaf_query()
 
+    def run_new_alignment(self):
+        if self.gfa_path is None:
+            d = OkPopup("ERROR", "Must open a GFA to align to")
+            d.exec()
+
+            return
+
+        d = RunAlignmentPopup(self.gfa_path)
+        if d.exec_() == QDialog.Accepted:
+            print(d.gaf_path)
+            self.gaf_path = d.gaf_path
+            self.load_gaf()
+
     def construct_left_control_panel(self):
         self.control_panel_left = QVBoxLayout()
 
@@ -476,6 +658,10 @@ class Window(QWidget):
 
         button = QPushButton("Open GAF (alignments)")
         button.clicked.connect(self.open_gaf)
+        self.control_panel_left.addWidget(button)
+
+        button = QPushButton("Run new alignment")
+        button.clicked.connect(self.run_new_alignment)
         self.control_panel_left.addWidget(button)
 
         button = QPushButton("Redraw graph")
@@ -524,24 +710,6 @@ class Window(QWidget):
         self.control_panel_left.setAlignment(Qt.AlignTop)
         self.control_panel_left.setSpacing(2)
         self.control_panel_left.addStretch(1)
-
-    def parse_string_as_numeric_positive_integer(self,s):
-        i = None
-
-        if s == "":
-            pass
-        elif not s.isnumeric():
-            d = OkPopup("ERROR", "Must enter numeric integer value")
-            d.exec()
-        else:
-            i = int(s)
-
-            if i < 0:
-                d = OkPopup("ERROR", "Must enter POSITIVE numeric integer value")
-                d.exec()
-                i = None
-
-        return i
 
     def adjust_node_width(self):
         s = self.line_width_field.text()

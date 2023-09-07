@@ -193,7 +193,7 @@ class GafElement:
             if token.startswith(tag_prefix):
                 return 12 + t
 
-        exit("ERROR: tag not found: " + tag_prefix)
+        raise Exception("WARNING: tag not found: " + tag_prefix)
 
     def find_tag(self, tag_substring):
         for token in self.tokens[12:]:
