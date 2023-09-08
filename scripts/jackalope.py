@@ -165,8 +165,8 @@ class RunAlignmentPopup(QDialog):
         self.layout.addLayout(output_layout)
 
         # Should the alignments replace the current GAF alignments or append it?
-        replacement_checkbox = QCheckBox("Replace alignments (default=append)")
-        self.layout.addWidget(replacement_checkbox)
+        self.replacement_checkbox = QCheckBox("Replace alignments (default=append)")
+        self.layout.addWidget(self.replacement_checkbox)
 
         run_button = QPushButton("Run")
         run_button.clicked.connect(self.run_alignment)
@@ -208,7 +208,7 @@ class RunAlignmentPopup(QDialog):
         fasta_path = self.input_field.text()
         output_dir = self.output_field.text()
 
-        self.gaf_path = run_minigraph(
+        self.gaf_path = run_panaligner(
             output_directory=output_dir,
             gfa_path=self.gfa_path,
             fasta_path=fasta_path,
@@ -408,7 +408,7 @@ class Window(QWidget):
         print("done")
 
     def open_gfa(self):
-        self.reset_highlights()
+        self.clear_highlights()
         self.scene_bottom.clear()
 
         # https://pythonspot.com/pyqt5-file-dialog/
@@ -435,7 +435,7 @@ class Window(QWidget):
     def load_gfa(self):
         # This will be called repeatedly in some cases, so reset the relevant datastructures
         self.scene_bottom.clear()
-        self.reset_highlights()
+        self.clear_highlights()
         self.clear_gaf()
 
         self.qt_nodes = dict()
@@ -453,6 +453,7 @@ class Window(QWidget):
 
     def clear_gaf(self):
         self.scene_middle.clear()
+        self.clear_highlights()
         self.alignments = defaultdict(list)
         self.alignment_combobox.blockSignals(True)
         self.alignment_combobox.clear()
@@ -464,8 +465,8 @@ class Window(QWidget):
     def load_gaf(self, replace=True):
         if replace:
             self.clear_gaf()
+            self.alignments = defaultdict(list)
 
-        self.alignments = defaultdict(list)
         for a in iter_gaf_alignments(self.gaf_path):
             self.alignments[a.get_query_name()].append(a)
 
@@ -475,6 +476,8 @@ class Window(QWidget):
                     d = OkPopup("ERROR", "GAF contains node names which do not exist in GFA, or GFA is not loaded. \n\n"
                                          "Please open compatible GFA first.")
                     d.exec()
+
+                    # TODO: make clearing optional
                     self.clear_gaf()
 
                     return
@@ -591,13 +594,13 @@ class Window(QWidget):
             else:
                 raise Exception("ERROR: bad GAF node")
 
-    def reset_highlights(self):
+    def clear_highlights(self):
         for item in self.bottom_highlight_items:
             self.scene_bottom.removeItem(item)
             self.bottom_highlight_items = list()
 
     def on_select_alignment_block(self):
-        self.reset_highlights()
+        self.clear_highlights()
 
         items = self.scene_middle.selectedItems()
 
@@ -631,7 +634,7 @@ class Window(QWidget):
 
     def redraw_graph(self):
         if self.gfa_path is not None and len(self.sequences) > 0:
-            self.reset_highlights()
+            self.clear_highlights()
             self.scene_bottom.clear()
             self.draw_graph()
             self.on_select_gaf_query()
@@ -647,7 +650,12 @@ class Window(QWidget):
         if d.exec_() == QDialog.Accepted:
             print(d.gaf_path)
             self.gaf_path = d.gaf_path
-            self.load_gaf()
+
+            if d.replacement_checkbox.isChecked():
+                self.clear_gaf()
+                self.load_gaf()
+            else:
+                self.load_gaf(replace=False)
 
     def construct_left_control_panel(self):
         self.control_panel_left = QVBoxLayout()
