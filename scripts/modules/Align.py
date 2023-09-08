@@ -105,6 +105,8 @@ def run_panaligner(output_directory, gfa_path, fasta_path, n_threads, args_overr
             sys.stderr.write(str(e))
             return False
 
+    sys.stderr.write("done\n")
+
     return output_path
 
 
