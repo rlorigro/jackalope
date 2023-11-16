@@ -7,7 +7,7 @@ import random
 from modules.Gfa import iterate_gfa_edges,iterate_gfa_nodes
 from modules.Gaf import GafElement, iter_gaf_alignments
 from modules.IncrementalIdMap import IncrementalIdMap
-from modules.Align import run_minigraph,run_panaligner
+from modules.Align import run_minigraph,run_panaligner,run_graphaligner
 
 import matplotlib
 import networkx
@@ -92,17 +92,10 @@ class RunAlignmentPopup(QDialog):
 
         self.layout = QVBoxLayout()
 
-        self.setWindowTitle("Run new alignment")
+        self.setWindowTitle("Run new alignment (GraphAligner)")
 
         args = [
-            "-c", "\n" +
-            "-g", str(10000), "\n" +
-            "-k", str(14), "\n" +
-            "-f", "0.25", "\n" +
-            "-r", "1000,20000", "\n" +
-            "-n", "3,3", "\n" +
-            "-p", str(0.5), "\n" +
-            "-x", "lr", "\n"
+            "-x", "vg"
         ]
 
         # Node width field
@@ -208,7 +201,7 @@ class RunAlignmentPopup(QDialog):
         fasta_path = self.input_field.text()
         output_dir = self.output_field.text()
 
-        self.gaf_path = run_panaligner(
+        self.gaf_path = run_graphaligner(
             output_directory=output_dir,
             gfa_path=self.gfa_path,
             fasta_path=fasta_path,
